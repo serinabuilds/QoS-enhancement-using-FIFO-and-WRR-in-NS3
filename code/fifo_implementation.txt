@@ -1,0 +1,59 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/ipv4-global-routing-helper.h"
+
+using namespace ns3;
+
+int main()
+{
+    NodeContainer nodes;
+    nodes.Create(5);
+
+    PointToPointHelper sourceLink;
+    sourceLink.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+    sourceLink.SetChannelAttribute("Delay", StringValue("2ms"));
+
+    PointToPointHelper bottleneckLink;
+    bottleneckLink.SetDeviceAttribute("DataRate", StringValue("1Mbps"));
+    bottleneckLink.SetChannelAttribute("Delay", StringValue("10ms"));
+
+    NetDeviceContainer d0 =
+        sourceLink.Install(nodes.Get(0), nodes.Get(3));
+
+    NetDeviceContainer d1 =
+        sourceLink.Install(nodes.Get(1), nodes.Get(3));
+
+    NetDeviceContainer d2 =
+        sourceLink.Install(nodes.Get(2), nodes.Get(3));
+
+    NetDeviceContainer d3 =
+        bottleneckLink.Install(nodes.Get(3), nodes.Get(4));
+
+    InternetStackHelper stack;
+    stack.Install(nodes);
+
+    Ipv4AddressHelper address;
+
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    address.Assign(d0);
+
+    address.SetBase("10.1.2.0", "255.255.255.0");
+    address.Assign(d1);
+
+    address.SetBase("10.1.3.0", "255.255.255.0");
+    address.Assign(d2);
+
+    address.SetBase("10.1.4.0", "255.255.255.0");
+    address.Assign(d3);
+
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+    std::cout << "Router topology created!" << std::endl;
+
+    Simulator::Run();
+    Simulator::Destroy();
+
+    return 0;
+}

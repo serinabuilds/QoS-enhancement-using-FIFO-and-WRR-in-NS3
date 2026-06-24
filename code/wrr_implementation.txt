@@ -1,0 +1,254 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/ipv4-global-routing-helper.h"
+
+#include <vector>
+#include <cmath>
+
+using namespace ns3;
+
+int main()
+{
+    NodeContainer nodes;
+    nodes.Create(5);
+
+    PointToPointHelper sourceLink;
+    sourceLink.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+    sourceLink.SetChannelAttribute("Delay", StringValue("2ms"));
+
+    PointToPointHelper bottleneckLink;
+    bottleneckLink.SetDeviceAttribute("DataRate", StringValue("1Mbps"));
+    bottleneckLink.SetChannelAttribute("Delay", StringValue("10ms"));
+
+    NetDeviceContainer d0 =
+        sourceLink.Install(nodes.Get(0), nodes.Get(3));
+
+    NetDeviceContainer d1 =
+        sourceLink.Install(nodes.Get(1), nodes.Get(3));
+
+    NetDeviceContainer d2 =
+        sourceLink.Install(nodes.Get(2), nodes.Get(3));
+
+    NetDeviceContainer d3 =
+        bottleneckLink.Install(nodes.Get(3), nodes.Get(4));
+
+    InternetStackHelper stack;
+    stack.Install(nodes);
+
+    Ipv4AddressHelper address;
+
+    Ipv4InterfaceContainer i0, i1, i2, i3;
+
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    i0 = address.Assign(d0);
+
+    address.SetBase("10.1.2.0", "255.255.255.0");
+    i1 = address.Assign(d1);
+
+    address.SetBase("10.1.3.0", "255.255.255.0");
+    i2 = address.Assign(d2);
+
+    address.SetBase("10.1.4.0", "255.255.255.0");
+    i3 = address.Assign(d3);
+
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+    // ===================================================
+    // VOICE TRAFFIC (Highest Weight = 5)
+    // ===================================================
+
+    uint16_t voicePort = 5000;
+
+    UdpServerHelper voiceServer(voicePort);
+
+    ApplicationContainer voiceSink =
+        voiceServer.Install(nodes.Get(4));
+
+    voiceSink.Start(Seconds(0));
+    voiceSink.Stop(Seconds(20));
+
+    UdpClientHelper voiceClient(
+        i3.GetAddress(1),
+        voicePort);
+
+    voiceClient.SetAttribute(
+        "MaxPackets",
+        UintegerValue(100000));
+
+    voiceClient.SetAttribute(
+        "Interval",
+        TimeValue(MilliSeconds(5)));
+
+    voiceClient.SetAttribute(
+        "PacketSize",
+        UintegerValue(160));
+
+    ApplicationContainer voiceApp =
+        voiceClient.Install(nodes.Get(0));
+
+    voiceApp.Start(Seconds(1));
+    voiceApp.Stop(Seconds(20));
+
+    // ===================================================
+    // VIDEO TRAFFIC (Weight = 3)
+    // ===================================================
+
+    OnOffHelper video(
+        "ns3::UdpSocketFactory",
+        InetSocketAddress(
+            i3.GetAddress(1),
+            6000));
+
+    video.SetAttribute(
+        "DataRate",
+        StringValue("300kbps"));
+
+    video.SetAttribute(
+        "PacketSize",
+        UintegerValue(1000));
+
+    ApplicationContainer videoApp =
+        video.Install(nodes.Get(1));
+
+    videoApp.Start(Seconds(1));
+    videoApp.Stop(Seconds(20));
+
+    // ===================================================
+    // FTP TRAFFIC (Weight = 1)
+    // ===================================================
+
+    PacketSinkHelper ftpSink(
+        "ns3::TcpSocketFactory",
+        InetSocketAddress(
+            Ipv4Address::GetAny(),
+            7000));
+
+    ftpSink.Install(nodes.Get(4));
+
+    BulkSendHelper ftp(
+        "ns3::TcpSocketFactory",
+        InetSocketAddress(
+            i3.GetAddress(1),
+            7000));
+
+    ftp.SetAttribute(
+        "MaxBytes",
+        UintegerValue(500000));
+
+    ApplicationContainer ftpApp =
+        ftp.Install(nodes.Get(2));
+
+    ftpApp.Start(Seconds(1));
+    ftpApp.Stop(Seconds(20));
+
+    // ===================================================
+    // FLOW MONITOR
+    // ===================================================
+
+    FlowMonitorHelper flowmon;
+    Ptr<FlowMonitor> monitor =
+        flowmon.InstallAll();
+
+    std::cout
+        << "\n====================================\n"
+        << "WRR QoS Simulation Running\n"
+        << "Voice(5) Video(3) FTP(1)\n"
+        << "====================================\n";
+
+    Simulator::Stop(Seconds(20));
+    Simulator::Run();
+
+    monitor->CheckForLostPackets();
+
+    std::map<FlowId, FlowMonitor::FlowStats> stats =
+        monitor->GetFlowStats();
+
+    uint64_t totalTx = 0;
+    uint64_t totalRx = 0;
+
+    double totalThroughput = 0;
+    double totalDelay = 0;
+    double totalJitter = 0;
+
+    std::vector<double> flowThroughputs;
+
+    for (auto const& flow : stats)
+    {
+        totalTx += flow.second.txPackets;
+        totalRx += flow.second.rxPackets;
+
+        double throughput =
+            flow.second.rxBytes * 8.0 /
+            (19.0 * 1000.0);
+
+        totalThroughput += throughput;
+
+        flowThroughputs.push_back(throughput);
+
+        if (flow.second.rxPackets > 0)
+        {
+            totalDelay +=
+                flow.second.delaySum.GetSeconds() /
+                flow.second.rxPackets;
+
+            totalJitter +=
+                flow.second.jitterSum.GetSeconds() /
+                flow.second.rxPackets;
+        }
+    }
+
+    double pdr =
+        ((double)totalRx / totalTx) * 100.0;
+
+    double sum = 0;
+    double sumSq = 0;
+
+    for (double x : flowThroughputs)
+    {
+        sum += x;
+        sumSq += x * x;
+    }
+
+    double fairness =
+        (sum * sum) /
+        (flowThroughputs.size() * sumSq);
+
+    std::cout
+        << "\n========== WRR RESULTS ==========\n";
+
+    std::cout
+        << "Packets Sent: "
+        << totalTx << std::endl;
+
+    std::cout
+        << "Packets Received: "
+        << totalRx << std::endl;
+
+    std::cout
+        << "Throughput (kbps): "
+        << totalThroughput << std::endl;
+
+    std::cout
+        << "PDR (%): "
+        << pdr << std::endl;
+
+    std::cout
+        << "Average Delay (s): "
+        << totalDelay << std::endl;
+
+    std::cout
+        << "Average Jitter (s): "
+        << totalJitter << std::endl;
+
+    std::cout
+        << "Jain Fairness Index: "
+        << fairness << std::endl;
+
+    Simulator::Destroy();
+
+    return 0;
+}
